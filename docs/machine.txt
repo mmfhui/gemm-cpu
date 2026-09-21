@@ -1,0 +1,20 @@
+ Run the following to get the neccesary information about the machine you are using:
+ {
+  date
+  sysctl -n machdep.cpu.brand_string
+  echo "P-cores: $(sysctl -n hw.perflevel0.physicalcpu)"
+  echo "E-cores: $(sysctl -n hw.perflevel1.physicalcpu)"
+  echo "L1d (P-core): $(sysctl -n hw.perflevel0.l1dcachesize)"
+  echo "L2 (P-cluster): $(sysctl -n hw.perflevel0.l2cachesize)"
+  sw_vers
+}
+
+Sun Sep 20 19:54:31 EDT 2026
+Apple M4 Pro
+P-cores: 8
+E-cores: 4
+L1d (P-core): 131072
+L2 (P-cluster): 16777216
+ProductName:            macOS
+ProductVersion:         26.6.2
+BuildVersion:           25G83
