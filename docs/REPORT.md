@@ -111,3 +111,177 @@ unchanged kernel -- session-level noise, doesn't affect the v0-vs-v1
 conclusion but worth flagging. Re-check power state before the next run. -->
 
 Trigger for v2: unit-stride access is fixed, but nothing yet keeps values in registers across the k-loop or uses SIMD explicitly.
+
+### v2 ~ register-tiled 4x4 microkernel, NEON intrinsics
+
+<!-- Predicted: [your number] -- C's memory traffic drops from K touches to
+1 per tile, and computation moves from 1 number at a time to 4. -->
+
+| N    | GFLOP/s | % peak | norm_rel  | status |
+|------|---------|--------|-----------|--------|
+| 16   | 49.349  | 34.30% | 8.616e-08 | PASS   |
+| 64   | 59.356  | 41.25% | 1.481e-07 | PASS   |
+| 112  | 54.871  | 38.14% | 1.894e-07 | PASS   |
+| 240  | 43.403  | 30.17% | 2.789e-07 | PASS   |
+| 496  | 39.032  | 27.13% | 3.982e-07 | PASS   |
+| 1008 | 36.824  | 25.59% | 5.692e-07 | PASS   |
+
+Result: Large jump at small N (~doubled v1 at N=64), but the gain erodes as N grows. At N=1008, v2 is barely ahead of v1 (25.6% vs 24.2%).
+norm_rel matches v0 and v1 at every N, confirming error is governed by the arithmetic (sqrt(K)*u), not by loop structure.
+
+Trigger for v3: the erosion at large N means the data no longer fits in cache. Currently, nothing blocks the loops so that A/B/C tiles stay resident while they're being reused.
+
+### v3 ~ cache blocking (BLOCK=96)
+<!-- **Tile-size prediction**
+
+**Step 1: bytes per tile**
+
+A tile is b x b elements. At fp32 (4 bytes/element):
+
+  bytes_per_tile = b^2 x 4
+
+**Step 2: bytes for three tiles together**
+
+Blocking needs A's tile, B's tile, and C's tile resident simultaneously:
+
+  bytes_total = 3 x 4 x b^2 = 12 b^2
+
+**Step 3: the capacity constraint**
+
+This total can't exceed the actual cache size. We will call it M_cache (bytes).
+
+  12 b^2 <= M_cache
+
+  b^2    <= M_cache / 12
+
+  b      <= sqrt(M_cache / 12)
+
+**Step 4: plug in measured numbers**
+
+L1d = 131072 bytes, measured this session via sysctl (docs/machine.txt):
+
+  b <= sqrt(131072 / 12)
+
+  b <= sqrt(10922.67)
+  
+  b <= 104.5
+
+**Step 5: Round to usable number**
+
+104.5 isn't a usable block size on its own: it needs to be a whole number, and ideally a multiple of 4, since the microkernel operates in 4x4 chunks. A block
+size not divisible by 4 would create a partial microkernel call at every single block boundary, adding edge-case complexity for no benefit at this stage.
+
+104 itself is already divisible by 4 (104/4 = 26), so it's directly usable. But the theoretical bound of 104.5 assumes the ENTIRE L1d is
+available for exactly these three tiles and nothing else, which isn't true in practice (Real caches are set-associative, not fully associative and other temporaries also occupy cache lines):
+
+For these reasons, the practical starting choice is below the theoretical ceiling, not at it. Starting value: BLOCK = 96 (also a
+multiple of 4), leaving headroom for the effects above.
+
+**Scope:**
+
+**v3 BLOCK sweep predicted vs measured**
+
+Predicted: BLOCK ~ 96 (derived: b <= sqrt(131072/12) ~ 104, rounded down
+for associativity/occupancy headroom).
+
+Measured (swept 32/48/64/80/96/112/128, N=1008):
+  32:  44.44%   <- best
+  48:  37.46%
+  64:  35.62%
+  80:  34.28%
+  96:  34.48%   (predicted value)
+  112: 33.99%
+  128: 32.14%
+
+Result: prediction was wrong, and wrong in the opposite direction from
+its own caveat -- the derivation assumed smaller-than-theoretical would
+be needed for safety margin, but the real optimum (32) is roughly 3x
+smaller than even the conservative starting guess, not just modestly
+below the theoretical ceiling (104.5).
+
+Reconciliation: the b <= sqrt(M/12) bound only enforces that three
+tiles fit ONCE. It doesn't account for how long they need to stay
+resident -- a block of size b requires (b/4)^2 microkernel calls per
+K-block, all needing the same A/B panels to survive in cache
+simultaneously. Larger blocks hold more data resident for
+proportionally longer, giving far more opportunity for eviction via
+set-associativity conflicts and contention from other cores sharing
+the same L2 cluster (see Phase 1: L2 is shared across all 8 P-cores,
+not private). The capacity model was necessary but not sufficient --
+it ignored residency duration entirely.
+
+Decision: BLOCK = 32, chosen empirically, overriding the derived value.
+
+This derivation blocks for L1 only. L2 (16 MB, shared across the whole P-cluster) is not yet layered on top as v3 is L1 blocking specifically. -->
+
+<!-- Predicted: erosion seen in v2 at large N should be reduced or
+eliminated, since A/B/C tiles now stay within L1-sized blocks. -->
+
+| N    | GFLOP/s | % peak | norm_rel  | status |
+|------|---------|--------|-----------|--------|
+| 16   | 39.385  | 27.37% | 7.815e-08 | PASS   |
+| 64   | 68.759  | 47.79% | 1.476e-07 | PASS   |
+| 112  | 71.740  | 49.86% | 1.947e-07 | PASS   |
+| 240  | 70.291  | 48.85% | 2.807e-07 | PASS   |
+| 496  | 66.345  | 46.11% | 4.001e-07 | PASS   |
+| 1008 | 64.779  | 45.02% | 5.693e-07 | PASS   |
+
+Result:  erosion from v2 is essentially eliminated. v3 declines only 49.86% -> 45.02% from N=112 to N=1008, versus v2's 38.17% -> 25.42% over the same range. v3 is now ahead of v2 at every size except N=16.
+
+Trade-off: at N=16 only v3 underperforms v2 here (27.37% vs 45.55%), because BLOCK=32 does not evenly divide 16, so the blocking loops produce a single undersized, fragmented block rather than cleanly containing the whole matrix (pure overhead with no benefit at sizes that didn't need protecting from eviction).
+
+Trigger for v4: A is still re-fetched with strided scalar loads inside the microkernel rather than being copied into a contiguous buffer once
+per block (what packing fixes).
+
+### v4 -- packing (BLOCK=32)
+<!-- Predicted: [your number] -- expected real gains at larger N where
+blocks are reused enough to amortize the copy cost; possible wash or
+loss at N=16 given v3's fragmentation problem at that size. -->
+
+| N    | GFLOP/s | % peak | norm_rel  | status |
+|------|---------|--------|-----------|--------|
+| 16   | 49.054  | 34.09% | 7.596e-08 | PASS   |
+| 64   | 71.899  | 49.97% | 1.470e-07 | PASS   |
+| 112  | 74.516  | 51.79% | 1.916e-07 | PASS   |
+| 240  | 73.353  | 50.98% | 2.780e-07 | PASS   |
+| 496  | 71.866  | 49.95% | 3.988e-07 | PASS   |
+| 1008 | 65.124  | 45.26% | 5.694e-07 | PASS   |
+
+Result: v4 beats v3 at every size, including N=16 (34.09% vs 27.37%). Packing's benefit (sequential A reads instead of strided) apparently
+doesn't require many block-reuses to pay off, it even helps a single fragmented block. Packing's win is not just primarily about reuse amortization here but also about removing strided access from the hot loop directly. Peak achieved: 51.79% at N=112. The remaining gap to 100% would require multiple microkernel shapes, K/M/N-specific block tuning, or multi-threading.
+
+<!-- norm_rel unchanged from v3 at every size (packing doesn't alter the
+arithmetic or its order) -- confirms the gain is purely structural.
+max_rel roughly doubled at some sizes (e.g. N=1008: 3.19e-01 ->
+6.17e-01); given norm_rel is flat, this is the same near-zero-reference
+phenomenon from prior rungs landing on a different element, not a new
+correctness issue. -->
+
+Trigger for v5: the 4x4 tile gives only 4 independent accumulator chains  which is short of the ~20 compute.cpp's own peak sweep found
+necessary to saturate the FPU. Widening the microkernel would be the next optimization.
+
+### v5 ~ widened microkernel, 8x8 tile (16 accumulators)
+<!-- Predicted: [your number] -- targeting closer to the ~20 independent
+FMA chains compute.cpp found necessary for this chip's peak throughput,
+up from v4's 4. -->
+
+| N    | GFLOP/s | % peak | norm_rel  | status |
+|------|---------|--------|-----------|--------|
+| 16   | 49.054  | 34.09% | 7.453e-08 | PASS   |
+| 64   | 114.398 | 79.51% | 1.500e-07 | PASS   |
+| 112  | 115.670 | 80.39% | 1.947e-07 | PASS   |
+| 240  | 113.622 | 78.97% | 2.813e-07 | PASS   |
+| 496  | 112.722 | 78.34% | 3.985e-07 | PASS   |
+| 1008 | 104.268 | 72.47% | 5.692e-07 | PASS   |
+
+Result: ~1.5-1.6x over v4 at every size N>=64, reaching 80.39% at N=112. v4's bottleneck seems to be FPU occupancy, not memory traffic, and closing most of the gap to compute.cpp's ~20-chain finding closed most of the gap to peak. An exception was that N=16 barely moved (27.37% -> 34.09%), now the worst
+performer in the table (an 8x8 tile with K too shallow at this size to amortize the wider tile's fixed overhead against). Consistent with
+the pattern seen at prior iterations: larger structural optimizations trade a fixed cost against N=16's very small amount of real work. 
+
+Trigger for v6: B is still read directly from the original matrix on every microkernel call rather than packed into a contiguous buffer the
+way A is (microkernel's memory access pattern).
+
+<!-- norm_rel essentially unchanged across all six kernel versions at every
+size tested (e.g. N=1008: 5.694e-07 across v0-v5) -- six independent
+implementations, one accuracy profile, governed entirely by the
+arithmetic (sqrt(K)*u), not by any structural choice made along the way. -->

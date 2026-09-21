@@ -1,11 +1,6 @@
 // The triple loop implementation of GEMM with the inner two loops swapped for cache locality.
 #include "gemm.h"
 
-// clang++ -std=c++17 -O3 -mcpu=native -Iinclude src/bench/main.cpp \
-//   src/kernels/v0.cpp src/kernels/v1.cpp src/kernels/reference.cpp \
-//   src/bench/verify.cpp -o run_v0v1
-// ./run_v0v1
-
 void gemm_v1(int M, int N, int K,
             const float* A, int lda,
             const float* B, int ldb,

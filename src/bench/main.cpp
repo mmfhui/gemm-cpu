@@ -21,6 +21,10 @@ int main() {
     Kernel kernels[] = {
         {"v0", gemm_v0},
         {"v1", gemm_v1},
+        {"v2", gemm_v2},
+        {"v3", gemm_v3},
+        {"v4", gemm_v4},
+        {"v5", gemm_v5},
     };
 
     for (auto& k : kernels) {

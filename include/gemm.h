@@ -21,3 +21,23 @@ void gemm_v1(int M, int N, int K,
             const float* A, int lda,
             const float* B, int ldb,
             float* C, int ldc);
+
+void gemm_v2(int M, int N, int K,
+            const float* A, int lda,
+            const float* B, int ldb,
+            float* C, int ldc);
+
+void gemm_v3(int M, int N, int K,
+            const float* A, int lda,
+            const float* B, int ldb,
+            float* C, int ldc);
+
+void gemm_v4(int M, int N, int K,
+            const float* A, int lda,
+            const float* B, int ldb,
+            float* C, int ldc);
+
+void gemm_v5(int M, int N, int K,
+            const float* A, int lda,
+            const float* B, int ldb,
+            float* C, int ldc);
